@@ -1,6 +1,18 @@
 import React, { useState, useMemo, useEffect } from 'react';
 
-const IconProps = { fill: "none", stroke: "currentColor", viewBox: "0 0 24 24", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" } as const;
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from 'firebase/firestore';
+
+// Environment variables provided by the canvas
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const IconProps = { fill: "none", stroke: "currentColor", viewBox: "0 0 24 24", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" };
 const Building = ({size=24, className=""}) => <svg width={size} height={size} className={className} {...IconProps}><path d="M3 21h18M9 8h1m-1 4h1m-1 4h1m-1 4h1m4-12h1m-1 4h1m-1 4h1m-1 4h1m4-16v18a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>;
 const User = ({size=24, className=""}) => <svg width={size} height={size} className={className} {...IconProps}><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>;
 const Wallet = ({size=24, className=""}) => <svg width={size} height={size} className={className} {...IconProps}><path d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/></svg>;
@@ -15,18 +27,8 @@ const Calendar = ({size=24, className=""}) => <svg width={size} height={size} cl
 const CheckCircle2 = ({size=24, className=""}) => <svg width={size} height={size} className={className} {...IconProps}><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>;
 const LogOut = ({size=24, className=""}) => <svg width={size} height={size} className={className} {...IconProps}><path d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>;
 
-const INITIAL_MEMBERS = [
-  { id: 'm1', unit: '101', name: 'Rahul Sharma', phone: '9876543210' },
-  { id: 'm2', unit: '102', name: 'Priya Patel', phone: '8765432109' },
-];
-
-const INITIAL_MAINTENANCE = [
-  { id: '1', unit: '101', amount: 1500, month: 'June 2026', date: '2026-06-05', receiptNo: 'REC-001' },
-];
-
-const INITIAL_EXPENSES = [
-  { id: '1', category: 'Lift Maintenance', amount: 2500, description: 'Monthly AMC', date: '2026-06-08' },
-];
+const ADMIN_PHONE = '1111111111'; 
+const DUMMY_OTP = '1234';
 
 const EXPENSE_CATEGORIES = [
   'Electricity', 'Water Bill', 'Lift Maintenance', 'Cleaning/Sweeper', 
@@ -47,33 +49,101 @@ const formatCurrency = (amount) => {
   }).format(amount);
 };
 
-const formatDate = (dateString: string) => {
-  const options: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short', year: 'numeric' };
+const formatDate = (dateString) => {
+  const options = { day: 'numeric', month: 'short', year: 'numeric' };
   return new Date(dateString).toLocaleDateString('en-IN', options);
 };
 
 export default function ShriSaiSquareApp() {
-  // Auth & View States
-  const [currentUserRole, setCurrentUserRole] = useState(null); // 'admin' or 'member'
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [currentUserRole, setCurrentUserRole] = useState(null); 
   const [currentMember, setCurrentMember] = useState(null); 
   const [activeTab, setActiveTab] = useState('dashboard');
   
-  // Data States (Using local memory arrays instead of Firebase for preview)
-  const [members, setMembers] = useState(INITIAL_MEMBERS);
-  const [maintenanceRecords, setMaintenanceRecords] = useState(INITIAL_MAINTENANCE);
-  const [expenseRecords, setExpenseRecords] = useState(INITIAL_EXPENSES);
+  // Login / OTP Flow States
+  const [loginStep, setLoginStep] = useState('phone'); 
+  const [loginPhone, setLoginPhone] = useState('');
+  const [loginOtp, setLoginOtp] = useState('');
+  const [registerName, setRegisterName] = useState('');
+  const [registerUnit, setRegisterUnit] = useState('');
+  const [isLoadingAuth, setIsLoadingAuth] = useState(false);
+
+  // Cloud Data States
+  const [members, setMembers] = useState([]);
+  const [maintenanceRecords, setMaintenanceRecords] = useState([]);
+  const [expenseRecords, setExpenseRecords] = useState([]);
   
   // UI States
   const [showAddMaintenance, setShowAddMaintenance] = useState(false);
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [showAddMember, setShowAddMember] = useState(false);
   const [showPaymentGateway, setShowPaymentGateway] = useState(false);
+  const [showReceiptModal, setShowReceiptModal] = useState(false);
+  const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [toastMessage, setToastMessage] = useState(null);
 
-  const [mForm, setMForm] = useState({ unit: '', amount: '1500', month: 'June 2026', date: new Date().toISOString().split('T')[0] });
+  const [mForm, setMForm] = useState({ unit: '', amount: '1500', month: 'July 2026', date: new Date().toISOString().split('T')[0] });
   const [eForm, setEForm] = useState({ category: EXPENSE_CATEGORIES[0], amount: '', description: '', date: new Date().toISOString().split('T')[0] });
   const [memberForm, setMemberForm] = useState({ unit: '', name: '', phone: '' });
   const [paymentForm, setPaymentForm] = useState({ month: 'June 2026', amount: '1500' });
+
+  // Ensure Tailwind loads for preview environment formatting
+  useEffect(() => {
+    if (!document.getElementById('tailwind-script')) {
+      const script = document.createElement('script');
+      script.id = 'tailwind-script';
+      script.src = "https://cdn.tailwindcss.com";
+      document.head.appendChild(script);
+    }
+  }, []);
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Firebase Auth Error:", error);
+      }
+    };
+    initAuth();
+    
+    const unsubscribe = onAuthStateChanged(auth, (u) => setFirebaseUser(u));
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!firebaseUser) return;
+
+    // Listen to Members
+    const membersRef = collection(db, 'artifacts', appId, 'public', 'data', 'members');
+    const unsubMembers = onSnapshot(membersRef, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      data.sort((a, b) => a.unit.localeCompare(b.unit)); // Sort by flat number locally
+      setMembers(data);
+    }, (error) => console.error("Error fetching members:", error));
+
+    // Listen to Maintenance Records
+    const mainRef = collection(db, 'artifacts', appId, 'public', 'data', 'maintenance');
+    const unsubMain = onSnapshot(mainRef, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      data.sort((a, b) => new Date(b.date) - new Date(a.date)); // Sort newest first locally
+      setMaintenanceRecords(data);
+    }, (error) => console.error("Error fetching maintenance:", error));
+
+    // Listen to Expenses
+    const expRef = collection(db, 'artifacts', appId, 'public', 'data', 'expenses');
+    const unsubExp = onSnapshot(expRef, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      data.sort((a, b) => new Date(b.date) - new Date(a.date)); // Sort newest first locally
+      setExpenseRecords(data);
+    }, (error) => console.error("Error fetching expenses:", error));
+
+    return () => { unsubMembers(); unsubMain(); unsubExp(); };
+  }, [firebaseUser]);
 
   const { totalIncome, totalExpenses, balance } = useMemo(() => {
     const income = maintenanceRecords.reduce((sum, record) => sum + Number(record.amount), 0);
@@ -85,71 +155,166 @@ export default function ShriSaiSquareApp() {
     };
   }, [maintenanceRecords, expenseRecords]);
 
-  const showToast = (msg) => {
+  const showToast = (msg, duration = 4000) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 4000);
+    setTimeout(() => setToastMessage(null), duration);
   };
 
-  const handleAddMaintenance = (e) => {
+  const handleSendOtp = (e) => {
     e.preventDefault();
-    if (!mForm.unit || !mForm.amount) return;
+    if (loginPhone.length !== 10) {
+      showToast("Please enter a valid 10-digit mobile number.");
+      return;
+    }
+    setIsLoadingAuth(true);
+    // Simulate SMS delay
+    setTimeout(() => {
+      setIsLoadingAuth(false);
+      setLoginStep('otp');
+      showToast(`OTP sent to ${loginPhone}. Use ${DUMMY_OTP} to login.`);
+    }, 1000);
+  };
+
+  const handleVerifyOtp = (e) => {
+    e.preventDefault();
+    if (loginOtp !== DUMMY_OTP) {
+      showToast("Invalid OTP. Please try again.");
+      return;
+    }
+
+    setIsLoadingAuth(true);
+    setTimeout(() => {
+      setIsLoadingAuth(false);
+      
+      if (loginPhone === ADMIN_PHONE) {
+        setCurrentUserRole('admin');
+        setActiveTab('dashboard');
+        showToast("Logged in as Admin");
+        setLoginStep('phone'); setLoginPhone(''); setLoginOtp('');
+        return;
+      }
+
+      const existingMember = members.find(m => m.phone === loginPhone);
+      if (existingMember) {
+        setCurrentUserRole('member');
+        setCurrentMember(existingMember);
+        setActiveTab('member-home');
+        showToast(`Welcome back, ${existingMember.name}`);
+        setLoginStep('phone'); setLoginPhone(''); setLoginOtp('');
+      } else {
+        setLoginStep('register');
+      }
+    }, 1000);
+  };
+
+  const handleRegisterMember = async (e) => {
+    e.preventDefault();
+    if (!registerName || !registerUnit || !firebaseUser) return;
+
+    setIsLoadingAuth(true);
+    const newId = `m${Date.now()}`;
+    const newMember = { id: newId, unit: registerUnit, name: registerName, phone: loginPhone };
+
+    try {
+      const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', newId);
+      await setDoc(docRef, newMember);
+      
+      setCurrentUserRole('member');
+      setCurrentMember(newMember);
+      setActiveTab('member-home');
+      showToast("Registration successful! Welcome to Shri Sai Square.");
+      
+      setLoginStep('phone'); setLoginPhone(''); setLoginOtp('');
+      setRegisterName(''); setRegisterUnit('');
+    } catch (err) {
+      showToast("Failed to register. Please try again.");
+      console.error(err);
+    } finally {
+      setIsLoadingAuth(false);
+    }
+  };
+
+  const handleLogout = () => {
+    setCurrentUserRole(null); 
+    setCurrentMember(null); 
+    setActiveTab('dashboard');
+    setLoginStep('phone');
+    setLoginPhone('');
+    setLoginOtp('');
+  };
+
+  const handleAddMaintenance = async (e) => {
+    e.preventDefault();
+    if (!mForm.unit || !mForm.amount || !firebaseUser) return;
     
     const receiptNo = `REC-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
-    const newRecord = { ...mForm, id: Date.now().toString(), amount: Number(mForm.amount), receiptNo };
+    const newId = Date.now().toString();
+    const newRecord = { ...mForm, amount: Number(mForm.amount), receiptNo };
     
-    // Pure React state update
-    setMaintenanceRecords([newRecord, ...maintenanceRecords]);
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'maintenance', newId);
+    await setDoc(docRef, newRecord);
     
     setShowAddMaintenance(false);
     setMForm({ unit: '', amount: '1500', month: 'June 2026', date: new Date().toISOString().split('T')[0] });
     showToast(`Maintenance added successfully! Receipt: ${receiptNo}`);
   };
 
-  const handleAddExpense = (e) => {
+  const handleAddExpense = async (e) => {
     e.preventDefault();
-    if (!eForm.amount || !eForm.category) return;
+    if (!eForm.amount || !eForm.category || !firebaseUser) return;
 
-    const newRecord = { ...eForm, id: Date.now().toString(), amount: Number(eForm.amount) };
+    const newId = Date.now().toString();
+    const newRecord = { ...eForm, amount: Number(eForm.amount) };
     
-    setExpenseRecords([newRecord, ...expenseRecords]);
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'expenses', newId);
+    await setDoc(docRef, newRecord);
     
     setShowAddExpense(false);
     setEForm({ category: EXPENSE_CATEGORIES[0], amount: '', description: '', date: new Date().toISOString().split('T')[0] });
     showToast('Expense recorded successfully!');
   };
 
-  const handleAddMember = (e) => {
+  const handleAddMember = async (e) => {
     e.preventDefault();
-    if (!memberForm.unit || !memberForm.name) return;
+    if (!memberForm.unit || !memberForm.name || !firebaseUser) return;
 
-    const newMember = { ...memberForm, id: `m${Date.now()}` };
-    setMembers([...members, newMember]); 
+    const newId = `m${Date.now()}`;
+    const newMember = { ...memberForm };
+    
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', newId);
+    await setDoc(docRef, newMember);
     
     setShowAddMember(false);
     setMemberForm({ unit: '', name: '', phone: '' });
     showToast('Member added successfully!');
   };
 
-  const deleteMaintenance = (id) => {
-    setMaintenanceRecords(maintenanceRecords.filter(r => r.id !== id));
+  const deleteMaintenance = async (id) => {
+    if(!firebaseUser) return;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'maintenance', id);
+    await deleteDoc(docRef);
     showToast('Record deleted.');
   };
 
-  const deleteExpense = (id) => {
-    setExpenseRecords(expenseRecords.filter(r => r.id !== id));
+  const deleteExpense = async (id) => {
+    if(!firebaseUser) return;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id);
+    await deleteDoc(docRef);
     showToast('Expense deleted.');
   };
 
-  const deleteMember = (id) => {
-    setMembers(members.filter(r => r.id !== id));
+  const deleteMember = async (id) => {
+    if(!firebaseUser) return;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', id);
+    await deleteDoc(docRef);
     showToast('Member removed.');
   };
 
   const handleProcessPayment = () => {
-    setTimeout(() => {
-      const receiptNo = `REC-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+    setTimeout(async () => {
+      const receiptNo = `REC-${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`;
+      const newId = Date.now().toString();
       const newRecord = {
-        id: Date.now().toString(),
         unit: currentMember.unit,
         amount: Number(paymentForm.amount),
         month: paymentForm.month,
@@ -157,17 +322,26 @@ export default function ShriSaiSquareApp() {
         receiptNo: receiptNo
       };
       
-      setMaintenanceRecords([newRecord, ...maintenanceRecords]);
+      if(firebaseUser) {
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'maintenance', newId);
+        await setDoc(docRef, newRecord);
+      }
+      
       setShowPaymentGateway(false);
       
       showToast(
-        <div>
+        <div className="text-sm">
           <strong>Payment Successful!</strong><br/>
-          SMS sent to {currentMember.phone.slice(-4).padStart(10, '*')}: 
-          "Received ₹{paymentForm.amount} for {paymentForm.month}. Receipt: {receiptNo}"
-        </div>
+          <span className="text-xs opacity-80 block mt-1">SMS Simulation:</span>
+          "Dear {currentMember.name}, received ₹{paymentForm.amount} for Flat {currentMember.unit} Maintenance ({paymentForm.month}). Receipt: {receiptNo}. Thank you."
+        </div>,
+        8000 
       );
-    }, 1500);
+    }, 2000);
+  };
+
+  const downloadReceipt = (record) => {
+    showToast(`Downloading receipt ${record.receiptNo} for ${record.month}...`);
   };
 
   const renderLoginScreen = () => (
@@ -177,47 +351,107 @@ export default function ShriSaiSquareApp() {
           <Building size={40} className="text-teal-600" />
         </div>
         <h2 className="text-2xl font-bold text-gray-800 mb-2">Shri Sai Square</h2>
-        <p className="text-gray-500 text-sm mb-8">Please select your role to continue</p>
-
-        <div className="space-y-4">
-          <button 
-            onClick={() => { setCurrentUserRole('admin'); setActiveTab('dashboard'); }}
-            className="w-full bg-teal-600 hover:bg-teal-700 text-white p-4 rounded-xl font-medium transition-colors flex items-center justify-center gap-3 shadow-md"
-          >
-            <User size={20} /> Login as Admin
-          </button>
-          
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-200"></div>
-            </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="px-2 bg-white text-gray-500">Or resident login</span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            {members.length > 0 ? (
-              members.map(member => (
-                <button
-                  key={member.id}
-                  onClick={() => { 
-                    setCurrentUserRole('member'); 
-                    setCurrentMember(member);
-                    setActiveTab('member-home');
-                  }}
-                  className="bg-gray-50 hover:bg-teal-50 border border-gray-200 hover:border-teal-200 p-3 rounded-xl text-sm font-medium text-gray-700 transition-colors"
-                >
-                  Flat {member.unit}
-                </button>
-              ))
-            ) : (
-              <div className="col-span-2 text-sm text-gray-400 py-2">
-                No residents found. Please login as Admin to add flats.
+        
+        {loginStep === 'phone' && (
+          <div className="space-y-4 mt-6">
+            <p className="text-gray-500 text-sm mb-4">Login or Register with your Mobile Number</p>
+            <form onSubmit={handleSendOtp} className="space-y-4">
+              <div className="relative">
+                 <span className="absolute left-4 top-3.5 text-gray-500 font-medium">+91</span>
+                 <input 
+                   type="tel" 
+                   required 
+                   maxLength="10"
+                   pattern="[0-9]{10}"
+                   placeholder="Mobile Number"
+                   className="w-full pl-12 pr-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-teal-500 outline-none transition-all"
+                   value={loginPhone} 
+                   onChange={e => setLoginPhone(e.target.value.replace(/\D/g, ''))}
+                 />
               </div>
-            )}
+              <button 
+                type="submit"
+                disabled={isLoadingAuth || loginPhone.length !== 10}
+                className="w-full bg-teal-600 hover:bg-teal-700 disabled:bg-teal-300 text-white p-3.5 rounded-xl font-medium transition-colors shadow-md flex justify-center items-center h-[52px]"
+              >
+                {isLoadingAuth ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : "Send OTP"}
+              </button>
+            </form>
+            <div className="mt-6 p-4 bg-gray-50 rounded-xl text-xs text-gray-500 border border-gray-100 text-left">
+              <strong>Admin Demo:</strong> Use <code className="bg-gray-200 px-1 rounded">1111111111</code><br/>
+              <strong>New Resident:</strong> Enter your real number to register and access your dashboard.
+            </div>
           </div>
-        </div>
+        )}
+
+        {loginStep === 'otp' && (
+          <div className="space-y-4 mt-6 animate-in slide-in-from-right-4">
+             <p className="text-gray-500 text-sm mb-4">
+                Enter the OTP sent to +91 {loginPhone}
+             </p>
+             <form onSubmit={handleVerifyOtp} className="space-y-4">
+              <input 
+                 type="text" 
+                 required 
+                 maxLength="4"
+                 placeholder="4-digit OTP"
+                 className="w-full px-4 py-3 text-center tracking-[0.5em] text-lg rounded-xl border border-gray-200 focus:ring-2 focus:ring-teal-500 outline-none transition-all"
+                 value={loginOtp} 
+                 onChange={e => setLoginOtp(e.target.value.replace(/\D/g, ''))}
+               />
+               <button 
+                type="submit"
+                disabled={isLoadingAuth || loginOtp.length !== 4}
+                className="w-full bg-teal-600 hover:bg-teal-700 disabled:bg-teal-300 text-white p-3.5 rounded-xl font-medium transition-colors shadow-md flex justify-center items-center h-[52px]"
+              >
+                {isLoadingAuth ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : "Verify OTP"}
+              </button>
+             </form>
+             <button onClick={() => setLoginStep('phone')} className="text-sm text-teal-600 font-medium hover:underline mt-2">
+                Change Phone Number
+             </button>
+          </div>
+        )}
+
+        {loginStep === 'register' && (
+          <div className="space-y-4 mt-6 animate-in slide-in-from-right-4">
+             <div className="bg-orange-50 text-orange-800 p-3 rounded-xl text-sm mb-4 border border-orange-100">
+               It looks like you are new here! Please complete your registration.
+             </div>
+             <form onSubmit={handleRegisterMember} className="space-y-4 text-left">
+               <div>
+                 <label className="block text-xs font-medium text-gray-500 ml-1 mb-1">Full Name</label>
+                 <input 
+                   type="text" 
+                   required 
+                   placeholder="e.g. Rahul Sharma"
+                   className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-teal-500 outline-none"
+                   value={registerName} 
+                   onChange={e => setRegisterName(e.target.value)}
+                 />
+               </div>
+               <div>
+                 <label className="block text-xs font-medium text-gray-500 ml-1 mb-1">Flat / Unit Number</label>
+                 <input 
+                   type="text" 
+                   required 
+                   placeholder="e.g. 101"
+                   className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-teal-500 outline-none"
+                   value={registerUnit} 
+                   onChange={e => setRegisterUnit(e.target.value)}
+                 />
+               </div>
+               
+               <button 
+                type="submit"
+                disabled={isLoadingAuth}
+                className="w-full bg-teal-600 hover:bg-teal-700 text-white p-3.5 rounded-xl font-medium transition-colors shadow-md mt-2 flex justify-center items-center h-[52px]"
+              >
+                {isLoadingAuth ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : "Complete Registration"}
+              </button>
+             </form>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -242,15 +476,15 @@ export default function ShriSaiSquareApp() {
       </div>
 
       <div className="grid grid-cols-3 gap-3">
-        <button onClick={() => setActiveTab('maintenance')} className="bg-white p-3 rounded-2xl shadow-sm border border-gray-100 flex flex-col items-center justify-center gap-2 hover:bg-gray-50 transition-colors">
+        <button onClick={() => setActiveTab('maintenance')} className="bg-white p-3 rounded-2xl shadow-sm border border-gray-100 flex flex-col items-center justify-center gap-2">
           <div className="p-2.5 bg-teal-50 text-teal-600 rounded-full"><Wallet size={20} /></div>
           <span className="text-xs font-medium text-gray-700">Income</span>
         </button>
-        <button onClick={() => setActiveTab('expenses')} className="bg-white p-3 rounded-2xl shadow-sm border border-gray-100 flex flex-col items-center justify-center gap-2 hover:bg-gray-50 transition-colors">
+        <button onClick={() => setActiveTab('expenses')} className="bg-white p-3 rounded-2xl shadow-sm border border-gray-100 flex flex-col items-center justify-center gap-2">
           <div className="p-2.5 bg-rose-50 text-rose-600 rounded-full"><Receipt size={20} /></div>
           <span className="text-xs font-medium text-gray-700">Expenses</span>
         </button>
-        <button onClick={() => setActiveTab('members')} className="bg-white p-3 rounded-2xl shadow-sm border border-gray-100 flex flex-col items-center justify-center gap-2 hover:bg-gray-50 transition-colors">
+        <button onClick={() => setActiveTab('members')} className="bg-white p-3 rounded-2xl shadow-sm border border-gray-100 flex flex-col items-center justify-center gap-2">
           <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-full"><Users size={20} /></div>
           <span className="text-xs font-medium text-gray-700">Members</span>
         </button>
@@ -272,7 +506,7 @@ export default function ShriSaiSquareApp() {
 
       <div className="space-y-3">
         {members.length === 0 ? (
-          <div className="text-center py-10 text-gray-400">No members added yet.</div>
+          <div className="text-center py-10 text-gray-400">No members added to the database yet.</div>
         ) : (
           members.map((member) => (
             <div key={member.id} className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 flex items-center justify-between">
@@ -300,7 +534,14 @@ export default function ShriSaiSquareApp() {
   const renderMemberHome = () => {
     const myPayments = maintenanceRecords.filter(r => r.unit === currentMember.unit);
     const paidMonths = myPayments.map(r => r.month);
-    const nextDueMonth = MONTHS.find(m => !paidMonths.includes(m)) || MONTHS[0];
+    
+    let nextDueMonth = MONTHS[0]; 
+    for(let i=0; i<MONTHS.length; i++){
+      if(!paidMonths.includes(MONTHS[i])){
+        nextDueMonth = MONTHS[i];
+        break;
+      }
+    }
 
     return (
       <div className="space-y-6 animate-in fade-in duration-200">
@@ -308,9 +549,9 @@ export default function ShriSaiSquareApp() {
           <div className="flex justify-between items-start mb-4">
             <div>
               <h2 className="text-xl font-bold text-gray-800">Hello, {currentMember.name}</h2>
-              <p className="text-gray-500 text-sm">Flat {currentMember.unit}</p>
+              <p className="text-gray-500 text-sm">Flat {currentMember.unit} | +91 {currentMember.phone}</p>
             </div>
-            <div className="h-10 w-10 bg-teal-100 text-teal-700 rounded-full flex items-center justify-center font-bold">
+            <div className="h-12 w-12 bg-teal-100 text-teal-700 rounded-full flex items-center justify-center font-bold border border-teal-200">
               {currentMember.unit}
             </div>
           </div>
@@ -327,9 +568,9 @@ export default function ShriSaiSquareApp() {
               setPaymentForm({ month: nextDueMonth, amount: '1500' });
               setShowPaymentGateway(true);
             }}
-            className="bg-white text-indigo-700 px-6 py-2.5 rounded-full font-bold text-sm w-full shadow-md active:scale-95 transition-transform"
+            className="bg-white text-indigo-700 px-6 py-3 rounded-full font-bold text-sm w-full shadow-md active:scale-95 transition-transform flex items-center justify-center gap-2"
           >
-            Pay Now via HDFC Gateway
+            Pay Now via HDFC <Wallet size={16}/>
           </button>
         </div>
 
@@ -339,19 +580,30 @@ export default function ShriSaiSquareApp() {
           </h3>
           <div className="space-y-3">
             {myPayments.length === 0 ? (
-              <p className="text-center text-gray-400 py-4 text-sm">No payment history found.</p>
+              <p className="text-center text-gray-400 py-4 text-sm bg-white rounded-xl border border-gray-100 border-dashed">No payment history found.</p>
             ) : (
               myPayments.map(record => (
-                <div key={record.id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex justify-between items-center">
-                  <div>
-                    <div className="font-semibold text-sm text-gray-800">{record.month}</div>
-                    <div className="text-xs text-gray-500 mt-1">Paid on {formatDate(record.date)}</div>
-                    <div className="text-[10px] text-teal-600 font-mono mt-0.5 bg-teal-50 inline-block px-1 rounded">
-                      {record.receiptNo}
+                <div key={record.id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex flex-col gap-3">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <div className="font-semibold text-sm text-gray-800">{record.month} Maintenance</div>
+                      <div className="text-xs text-gray-500 mt-0.5">Paid on {formatDate(record.date)}</div>
+                    </div>
+                    <div className="font-bold text-emerald-600 text-sm">
+                      {formatCurrency(record.amount)}
                     </div>
                   </div>
-                  <div className="font-bold text-emerald-600 text-sm">
-                    {formatCurrency(record.amount)}
+                  
+                  <div className="flex items-center justify-between border-t border-gray-50 pt-3">
+                     <div className="text-[10px] text-teal-600 font-mono bg-teal-50 px-2 py-1 rounded">
+                        {record.receiptNo}
+                      </div>
+                      <button 
+                        onClick={() => { setSelectedReceipt(record); setShowReceiptModal(true); }}
+                        className="text-xs text-indigo-600 font-medium flex items-center gap-1 hover:underline"
+                      >
+                        View Receipt
+                      </button>
                   </div>
                 </div>
               ))
@@ -482,7 +734,7 @@ export default function ShriSaiSquareApp() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Phone Number (for SMS)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Phone Number</label>
                 <input 
                   type="tel" required placeholder="10-digit number" pattern="[0-9]{10}"
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-indigo-500 outline-none"
@@ -503,48 +755,105 @@ export default function ShriSaiSquareApp() {
           <div className="bg-white w-full max-w-md rounded-2xl overflow-hidden shadow-2xl animate-in zoom-in-95">
             <div className="bg-[#004C8F] p-4 text-white flex items-center justify-between">
               <div className="font-bold text-lg tracking-wider">HDFC BANK</div>
-              <div className="text-xs opacity-80 border border-white/30 px-2 py-1 rounded">SECURE PAYMENT</div>
+              <div className="text-xs opacity-80 border border-white/30 px-2 py-1 rounded flex items-center gap-1">
+                <CheckCircle2 size={12}/> SECURE
+              </div>
             </div>
             
-            <div className="p-6 bg-gray-50 border-b border-gray-200">
-              <div className="text-center mb-4">
-                <p className="text-sm text-gray-500">Paying to</p>
-                <p className="font-bold text-lg text-gray-800">Shri Sai Square Society</p>
+            <div className="p-6 bg-gray-50 border-b border-gray-200 text-center">
+              <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-3 text-blue-700">
+                 <Building size={32}/>
               </div>
-              <div className="flex justify-between items-center py-3 border-y border-gray-200 border-dashed">
-                <span className="text-gray-600">{paymentForm.month} Dues</span>
-                <span className="font-bold text-xl">₹{paymentForm.amount}</span>
+              <p className="text-sm text-gray-500">Paying to</p>
+              <p className="font-bold text-lg text-gray-800">Shri Sai Square Society</p>
+              
+              <div className="mt-4 p-4 bg-white rounded-xl border border-gray-100 shadow-sm text-left">
+                 <div className="flex justify-between items-center mb-2">
+                    <span className="text-gray-600 text-sm">Purpose</span>
+                    <span className="font-medium text-sm text-gray-800">{paymentForm.month} Maint.</span>
+                 </div>
+                 <div className="flex justify-between items-center mb-2">
+                    <span className="text-gray-600 text-sm">Flat</span>
+                    <span className="font-medium text-sm text-gray-800">{currentMember?.unit}</span>
+                 </div>
+                 <div className="flex justify-between items-center pt-2 border-t border-gray-100 mt-2">
+                    <span className="text-gray-600 text-sm">Total Amount</span>
+                    <span className="font-bold text-xl text-blue-700">₹{paymentForm.amount}</span>
+                 </div>
               </div>
             </div>
 
-            <div className="p-6 space-y-4">
-              <p className="text-xs text-center text-gray-500 font-medium mb-2">CHOOSE PAYMENT METHOD</p>
+            <div className="p-6 space-y-3 bg-white">
+              <p className="text-xs text-left text-gray-500 font-medium mb-1 uppercase tracking-wide">Pay using</p>
               
-              <button onClick={handleProcessPayment} className="w-full border border-gray-300 rounded-xl p-3 flex items-center justify-between hover:border-blue-500 hover:bg-blue-50 transition-colors group">
+              <button onClick={handleProcessPayment} className="w-full border border-gray-200 rounded-xl p-3 flex items-center justify-between hover:border-blue-500 hover:bg-blue-50 transition-all group">
                 <div className="flex items-center gap-3">
-                  <div className="bg-blue-100 p-2 rounded text-blue-700"><CreditCard size={20}/></div>
+                  <div className="bg-blue-50 p-2 rounded-lg text-blue-600"><CreditCard size={20}/></div>
                   <div className="text-left">
-                    <div className="font-medium text-gray-800 group-hover:text-blue-700">Credit / Debit Card</div>
-                    <div className="text-xs text-gray-500">Visa, Mastercard, RuPay</div>
+                    <div className="font-medium text-gray-800 group-hover:text-blue-700">Cards, UPI & More</div>
+                    <div className="text-xs text-gray-500">Google Pay, PhonePe, HDFC, SBI</div>
                   </div>
                 </div>
               </button>
 
-              <button onClick={handleProcessPayment} className="w-full border border-gray-300 rounded-xl p-3 flex items-center justify-between hover:border-blue-500 hover:bg-blue-50 transition-colors group">
-                <div className="flex items-center gap-3">
-                  <div className="bg-green-100 p-2 rounded text-green-700 font-bold">UPI</div>
-                  <div className="text-left">
-                    <div className="font-medium text-gray-800 group-hover:text-blue-700">UPI ID / QR Code</div>
-                    <div className="text-xs text-gray-500">GPay, PhonePe, Paytm</div>
-                  </div>
-                </div>
-              </button>
-
-              <button type="button" onClick={() => setShowPaymentGateway(false)} className="w-full py-3 mt-4 text-gray-500 text-sm font-medium hover:text-gray-800">
+              <button type="button" onClick={() => setShowPaymentGateway(false)} className="w-full py-3 mt-2 text-gray-500 text-sm font-medium hover:text-gray-800 transition-colors">
                 Cancel Payment
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Downloadable Receipt Modal */}
+      {showReceiptModal && selectedReceipt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+           <div className="bg-white w-full max-w-sm rounded-xl overflow-hidden shadow-2xl animate-in zoom-in-95">
+             <div className="p-6 border-b border-gray-100 text-center bg-gray-50">
+               <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-3">
+                  <CheckCircle2 size={24}/>
+               </div>
+               <h3 className="font-bold text-lg text-gray-800">Payment Receipt</h3>
+               <p className="text-xs text-gray-500 mt-1">Shri Sai Square Apartment</p>
+             </div>
+             
+             <div className="p-6 space-y-3">
+                <div className="flex justify-between border-b border-dashed border-gray-200 pb-3">
+                   <span className="text-gray-500 text-sm">Receipt No.</span>
+                   <span className="font-mono text-sm font-medium text-gray-800">{selectedReceipt.receiptNo}</span>
+                </div>
+                <div className="flex justify-between border-b border-dashed border-gray-200 pb-3">
+                   <span className="text-gray-500 text-sm">Date</span>
+                   <span className="text-sm font-medium text-gray-800">{formatDate(selectedReceipt.date)}</span>
+                </div>
+                <div className="flex justify-between border-b border-dashed border-gray-200 pb-3">
+                   <span className="text-gray-500 text-sm">Received From</span>
+                   <span className="text-sm font-medium text-gray-800">Flat {selectedReceipt.unit}</span>
+                </div>
+                <div className="flex justify-between border-b border-dashed border-gray-200 pb-3">
+                   <span className="text-gray-500 text-sm">For Month</span>
+                   <span className="text-sm font-medium text-gray-800">{selectedReceipt.month}</span>
+                </div>
+                <div className="flex justify-between pt-1">
+                   <span className="text-gray-800 font-bold">Total Paid</span>
+                   <span className="font-bold text-emerald-600 text-lg">{formatCurrency(selectedReceipt.amount)}</span>
+                </div>
+             </div>
+
+             <div className="p-4 bg-gray-50 flex gap-3">
+                <button 
+                  onClick={() => setShowReceiptModal(false)} 
+                  className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+                >
+                  Close
+                </button>
+                <button 
+                  onClick={() => downloadReceipt(selectedReceipt)} 
+                  className="flex-1 py-2.5 bg-teal-600 rounded-lg text-sm font-medium text-white flex items-center justify-center gap-2 hover:bg-teal-700"
+                >
+                  Download PDF
+                </button>
+             </div>
+           </div>
         </div>
       )}
     </>
@@ -555,6 +864,14 @@ export default function ShriSaiSquareApp() {
       <div className="bg-gray-100 min-h-screen flex justify-center font-sans">
         <div className="w-full max-w-md bg-gray-50 min-h-screen relative shadow-2xl flex flex-col overflow-hidden">
           {renderLoginScreen()}
+          
+          {/* Global Toast */}
+          {toastMessage && (
+            <div className="absolute top-4 left-4 right-4 z-50 bg-gray-800 text-white px-4 py-3 rounded-xl shadow-lg flex items-start gap-3 text-sm animate-in fade-in slide-in-from-top-5">
+              <CheckCircle2 size={20} className="text-emerald-400 shrink-0 mt-0.5" />
+              <div>{toastMessage}</div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -575,7 +892,7 @@ export default function ShriSaiSquareApp() {
           </div>
         </div>
         <button 
-          onClick={() => { setCurrentUserRole(null); setCurrentMember(null); setActiveTab('dashboard'); }}
+          onClick={handleLogout}
           className="p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors"
           title="Logout"
         >
